@@ -4,6 +4,7 @@ __pycache__/
 .pyinstaller-cache/
 build/
 dist/
+release/
 xhs_output/
 .xhs_browser_profile/
 *.spec
