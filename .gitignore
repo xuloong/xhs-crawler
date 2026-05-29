@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+.pyinstaller-cache/
+build/
+dist/
+xhs_output/
+.xhs_browser_profile/
+*.spec
