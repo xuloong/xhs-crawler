@@ -27,9 +27,6 @@ jobs:
       - name: Install Playwright runtime
         run: python -m playwright install chromium
 
-      - name: Generate icon assets
-        run: python scripts/generate_app_icon.py
-
       - name: Build Windows executable
         run: python scripts/build_desktop.py
 
