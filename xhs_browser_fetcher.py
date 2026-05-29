@@ -173,6 +173,8 @@ async def _fetch_with_logged_in_browser_async(
         try:
             await page.goto(link, wait_until="domcontentloaded", timeout=timeout * 1000)
             await settle_page(page)
+            await dismiss_login_overlays(page)
+            await settle_page(page)
             result.final_url = page.url
             result.note_id = note_id_from_url(page.url)
             result = await extract_page_result(page, result)
@@ -221,6 +223,59 @@ async def settle_page(page: Any) -> None:
         pass
     # Give client-rendered note content a small moment to hydrate.
     await asyncio.sleep(1)
+
+
+async def dismiss_login_overlays(page: Any) -> None:
+    """Close ordinary login prompts when the page is still publicly viewable."""
+    selectors = [
+        "[aria-label*='关闭']",
+        "[title*='关闭']",
+        "button:has-text('稍后')",
+        "button:has-text('以后再说')",
+        "button:has-text('暂不')",
+        "button:has-text('取消')",
+        "text=跳过",
+        ".close",
+        "[class*='close']",
+        "[class*='Close']",
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() and await locator.is_visible(timeout=400):
+                await locator.click(timeout=800)
+                await page.wait_for_timeout(300)
+        except Exception:
+            continue
+
+    try:
+        clicked = await page.evaluate(
+            """
+            () => {
+              const labels = ['关闭', '暂不登录', '以后再说', '稍后再说', '暂不', '跳过', '×', '✕'];
+              const nodes = Array.from(document.querySelectorAll('button, [role=button], a, span, div'));
+              for (const node of nodes) {
+                const text = [
+                  node.innerText || node.textContent || '',
+                  node.getAttribute('aria-label') || '',
+                  node.getAttribute('title') || ''
+                ].join(' ').trim();
+                if (!labels.some((label) => text === label || text.includes(label))) continue;
+                const rect = node.getBoundingClientRect();
+                if (rect.width < 8 || rect.height < 8) continue;
+                const style = window.getComputedStyle(node);
+                if (!['fixed', 'absolute', 'sticky'].includes(style.position)) continue;
+                node.click();
+                return true;
+              }
+              return false;
+            }
+            """
+        )
+        if clicked:
+            await page.wait_for_timeout(500)
+    except Exception:
+        pass
 
 
 async def extract_page_result(page: Any, result: NoteResult) -> NoteResult:
@@ -279,11 +334,14 @@ async def extract_page_result(page: Any, result: NoteResult) -> NoteResult:
     content = content or clean_text(data.get("description", ""))
     stats = extract_stats(data.get("buttonTexts", []) + [body_text])
 
-    if is_blocked_text(body_text):
+    has_note_content = has_meaningful_note_content(title, content, images, videos)
+    if has_note_content:
+        result.status = "ok"
+        if is_blocked_text(body_text):
+            result.error = "login_overlay_ignored"
+    elif is_blocked_text(body_text):
         result.status = "blocked"
         result.error = "browser_blocked_or_login_required"
-    elif title or content or images or videos:
-        result.status = "ok"
     else:
         result.status = "empty"
         result.error = "browser_no_parseable_content"
@@ -313,6 +371,17 @@ def strip_xhs_suffix(value: str) -> str:
     value = clean_text(value)
     value = re.sub(r"\s*-\s*小红书\s*$", "", value)
     return value if value != "小红书" else ""
+
+
+def has_meaningful_note_content(title: str, content: str, images: list[str], videos: list[str]) -> bool:
+    if images or videos:
+        return True
+    if title and title not in ("小红书", "登录小红书"):
+        return True
+    if content and len(content) >= 12:
+        login_only = ["登录", "扫码", "验证码", "安全验证", "请完成验证"]
+        return not all(marker in content for marker in login_only[:2])
+    return False
 
 
 def normalize_images(values: list[str], base_url: str) -> list[str]:

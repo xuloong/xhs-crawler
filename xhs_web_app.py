@@ -536,7 +536,7 @@ INDEX_HTML = r"""<!doctype html>
           <img class="brand-icon" src="/assets/app_icon.png" alt="">
           <div class="brand-text">
             <h1>小红书笔记批量爬取工具</h1>
-            <div class="sub">批量爬取笔记内容，自动下载图片/视频，并导出表格和文档。</div>
+            <div class="sub">默认免登录尝试公开内容，自动下载图片/视频，并导出表格和文档。</div>
           </div>
         </div>
         <div class="chips">
@@ -566,8 +566,8 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </div>
           <div class="actions">
-            <button id="loginBrowserBtn" class="secondary" type="button">打开登录浏览器</button>
             <button id="browserRunBtn" class="primary" type="button">开始爬取</button>
+            <button id="loginBrowserBtn" class="secondary" type="button">受限时登录</button>
             <button id="clearBtn" class="secondary" type="button">清空</button>
           </div>
         </div>
@@ -702,7 +702,7 @@ INDEX_HTML = r"""<!doctype html>
 
     loginBrowserBtn.addEventListener("click", async () => {
       loginBrowserBtn.disabled = true;
-      setSummary("正在打开登录浏览器", "请在新打开的 Chrome 窗口里扫码登录小红书。", currentResults);
+      setSummary("正在打开登录浏览器", "遇到受限内容时，可在新窗口扫码登录后再爬取。", currentResults);
       try {
         const res = await fetch("/api/browser-start", { method: "POST" });
         const payload = await res.json();
@@ -1214,7 +1214,7 @@ class XhsWebHandler(SimpleHTTPRequestHandler):
             debug_url = ensure_login_browser()
             self.send_json(
                 {
-                    "message": "登录浏览器已打开。扫码登录小红书后，回到工具页点击“开始爬取”。",
+                    "message": "登录浏览器已打开。只在受限时需要扫码登录；登录后回到工具页点击“开始爬取”。",
                     "debug_url": debug_url,
                     "login_url": "https://www.xiaohongshu.com",
                 }
@@ -1248,7 +1248,7 @@ class XhsWebHandler(SimpleHTTPRequestHandler):
             write_outputs(results, out_dir)
             self.send_json(
                 {
-                    "message": f"浏览器辅助爬取 {len(results)} 条，文件保存在 {out_dir}",
+                    "message": f"已爬取 {len(results)} 条，文件保存在 {out_dir}",
                     "results": results_as_dicts(results),
                     "files": {
                         "csv": f"/output/{run_id}/notes.csv",
