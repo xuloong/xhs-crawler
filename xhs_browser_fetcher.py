@@ -2,9 +2,9 @@
 """
 Browser-assisted Xiaohongshu fetcher.
 
-This module uses a Chrome window that the user logs into directly. It only
-extracts content visible to that logged-in browser session and does not bypass
-captcha, login, signatures, or access controls.
+This module uses a normal Chrome window and the user's browser profile. It only
+extracts content visible to that browser session and does not bypass captcha,
+login, signatures, or access controls.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ _loop: asyncio.AbstractEventLoop | None = None
 _loop_thread: threading.Thread | None = None
 _playwright: Any | None = None
 _context: Any | None = None
+_context_mode: str | None = None
 
 
 def ensure_login_browser() -> str:
@@ -37,7 +38,7 @@ def ensure_login_browser() -> str:
 
 
 async def _ensure_login_browser_async() -> str:
-    context = await get_browser_context()
+    context = await get_browser_context(mode="login")
     page = await context.new_page()
     target_url = "https://www.xiaohongshu.com/explore"
     try:
@@ -55,28 +56,32 @@ async def _ensure_login_browser_async() -> str:
     return target_url
 
 
-async def get_browser_context() -> Any:
-    global _playwright, _context
+async def get_browser_context(mode: str = "fetch") -> Any:
+    global _playwright, _context, _context_mode
     if _context is not None:
         try:
-            if _context.pages:
+            if _context.pages and _context_mode == mode:
                 return _context
         except Exception:
             _context = None
+        if _context is not None:
+            await _close_login_browser_async()
 
     from playwright.async_api import async_playwright
 
     BROWSER_PROFILE_DIR.mkdir(exist_ok=True)
     _playwright = await async_playwright().start()
+    visible_login = mode == "login"
+    args = [
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
     launch_options = {
         "user_data_dir": str(BROWSER_PROFILE_DIR),
         "headless": False,
         "viewport": {"width": 1280, "height": 900},
         "ignore_default_args": ["--no-sandbox"],
-        "args": [
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
+        "args": args,
     }
     chrome_path = find_browser_executable()
     if chrome_path:
@@ -86,6 +91,7 @@ async def get_browser_context() -> Any:
     _context = await _playwright.chromium.launch_persistent_context(
         **launch_options,
     )
+    _context_mode = mode
     return _context
 
 
@@ -94,7 +100,7 @@ def close_login_browser() -> None:
 
 
 async def _close_login_browser_async() -> None:
-    global _playwright, _context
+    global _playwright, _context, _context_mode
     if _context is not None:
         try:
             await _context.close()
@@ -107,6 +113,7 @@ async def _close_login_browser_async() -> None:
             pass
     _context = None
     _playwright = None
+    _context_mode = None
 
 
 def focus_chrome_window() -> None:
@@ -116,6 +123,26 @@ def focus_chrome_window() -> None:
             subprocess.run(["osascript", "-e", 'tell application "Google Chrome" to activate'], check=False, timeout=2)
         elif system == "Windows":
             # Browser windows usually come to front when launched; no hard dependency on pywin32.
+            return
+    except Exception:
+        pass
+
+
+def hide_browser_window() -> None:
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            for process_name in ("Google Chrome", "Microsoft Edge", "Chromium"):
+                subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        f'tell application "System Events" to if exists process "{process_name}" then set visible of process "{process_name}" to false',
+                    ],
+                    check=False,
+                    timeout=2,
+                )
+        elif system == "Windows":
             return
     except Exception:
         pass
@@ -161,7 +188,7 @@ async def _fetch_with_logged_in_browser_async(
     delay: float = 1.5,
     timeout: float = 25,
 ) -> list[NoteResult]:
-    context = await get_browser_context()
+    context = await get_browser_context(mode="fetch")
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
     results: list[NoteResult] = []
@@ -305,6 +332,86 @@ async def extract_page_result(page: Any, result: NoteResult) -> NoteResult:
               node.getAttribute("title") || ""
             ].join(" ").trim())
             .filter(Boolean);
+          const readSocialCount = (keywords) => {
+            const numberPattern = /([0-9]+(?:\\.[0-9]+)?\\s*(?:万|w|W|k|K)?)/;
+            const nodes = Array.from(document.querySelectorAll("button, [role=button], a, span, div, svg, use"));
+            for (const node of nodes) {
+              const attrs = [
+                node.className && node.className.baseVal ? node.className.baseVal : node.className || "",
+                node.id || "",
+                node.getAttribute("aria-label") || "",
+                node.getAttribute("title") || "",
+                node.getAttribute("href") || "",
+                node.getAttribute("xlink:href") || "",
+                node.innerText || node.textContent || ""
+              ].join(" ");
+              const lowered = attrs.toLowerCase();
+              if (!keywords.some((keyword) => lowered.includes(keyword.toLowerCase()))) continue;
+              const host = node.closest("button, [role=button], a, [class*=like], [class*=collect], [class*=comment], [class*=chat], [class*=share]") || node.parentElement || node;
+              const candidates = [host, host.parentElement, host.nextElementSibling, host.previousElementSibling].filter(Boolean);
+              for (const item of candidates) {
+                const text = [
+                  item.innerText || item.textContent || "",
+                  item.getAttribute && (item.getAttribute("aria-label") || ""),
+                  item.getAttribute && (item.getAttribute("title") || "")
+                ].join(" ").trim();
+                if (!text || text.length > 160) continue;
+                const match = text.match(numberPattern);
+                if (match) return match[1].replace(/\\s+/g, "");
+              }
+            }
+            return "";
+          };
+          const readBottomActionStats = () => {
+            const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 1280;
+            const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 900;
+            const candidates = Array.from(document.querySelectorAll("button, [role=button], span, div"))
+              .map((node) => {
+                const rect = node.getBoundingClientRect();
+                const text = (node.innerText || node.textContent || "").trim();
+                return { node, rect, text };
+              })
+              .filter((item) => {
+                const { rect, text } = item;
+                if (!text || text.length > 12) return false;
+                if (rect.width < 6 || rect.height < 6) return false;
+                if (rect.left < viewportWidth * 0.45) return false;
+                if (rect.top < viewportHeight * 0.52) return false;
+                if (!/^\\d+(?:\\.\\d+)?\\s*(?:万|w|W|k|K)?$/.test(text)) return false;
+                return true;
+              })
+              .sort((a, b) => (a.rect.top - b.rect.top) || (a.rect.left - b.rect.left));
+
+            const rows = [];
+            for (const item of candidates) {
+              const row = rows.find((existing) => Math.abs(existing.top - item.rect.top) < 18);
+              if (row) {
+                row.items.push(item);
+                row.top = Math.min(row.top, item.rect.top);
+              } else {
+                rows.push({ top: item.rect.top, items: [item] });
+              }
+            }
+
+            const actionRow = rows
+              .map((row) => ({
+                ...row,
+                items: row.items
+                  .sort((a, b) => a.rect.left - b.rect.left)
+                  .filter((item, index, list) => index === 0 || item.text !== list[index - 1].text || Math.abs(item.rect.left - list[index - 1].rect.left) > 12),
+              }))
+              .filter((row) => row.items.length >= 3)
+              .sort((a, b) => b.top - a.top)[0];
+
+            if (!actionRow) return {};
+            const values = actionRow.items.map((item) => item.text.replace(/\\s+/g, ""));
+            return {
+              likes: values[0] || "",
+              collects: values[1] || "",
+              comments: values[2] || "",
+              shares: values[3] || "",
+            };
+          };
           const times = Array.from(document.querySelectorAll("time, [datetime], [class*=time], [class*=date]"))
             .map((node) => node.getAttribute("datetime") || node.innerText || node.textContent || "")
             .filter(Boolean);
@@ -317,6 +424,13 @@ async def extract_page_result(page: Any, result: NoteResult) -> NoteResult:
             authors: visibleText("[class*=author], [class*=user], [class*=name], [class*=nickname], a[href*='/user/profile']"),
             texts: visibleText("[class*=desc], [class*=content], [class*=note], article, main"),
             buttonTexts,
+            socialStats: {
+              likes: readSocialCount(["like", "likes", "liked", "赞", "点赞"]),
+              collects: readSocialCount(["collect", "favorite", "fav", "star", "收藏"]),
+              comments: readSocialCount(["comment", "chat", "评论"]),
+              shares: readSocialCount(["share", "转发", "分享"]),
+            },
+            bottomActionStats: readBottomActionStats(),
             times,
             datetimeAttrs: attrText("[datetime]", "datetime"),
             bodyText: (document.body && document.body.innerText || "").trim(),
@@ -333,6 +447,11 @@ async def extract_page_result(page: Any, result: NoteResult) -> NoteResult:
     content = extract_note_content(body_text, title) or first_text(data.get("texts", []), min_len=8, max_len=5000)
     content = content or clean_text(data.get("description", ""))
     stats = extract_stats(data.get("buttonTexts", []) + [body_text])
+    social_stats = data.get("socialStats", {}) if isinstance(data.get("socialStats", {}), dict) else {}
+    for key in ("likes", "comments", "collects", "shares"):
+        stats[key] = stats.get(key) or clean_text(social_stats.get(key, ""))
+    bottom_action_stats = data.get("bottomActionStats", {}) if isinstance(data.get("bottomActionStats", {}), dict) else {}
+    apply_bottom_action_stats(stats, social_stats, bottom_action_stats, len(images))
 
     has_note_content = has_meaningful_note_content(title, content, images, videos)
     if has_note_content:
@@ -371,6 +490,53 @@ def strip_xhs_suffix(value: str) -> str:
     value = clean_text(value)
     value = re.sub(r"\s*-\s*小红书\s*$", "", value)
     return value if value != "小红书" else ""
+
+
+def apply_bottom_action_stats(
+    stats: dict[str, str],
+    social_stats: dict[str, Any],
+    bottom_action_stats: dict[str, Any],
+    image_count: int,
+) -> None:
+    bottom_likes = clean_text(bottom_action_stats.get("likes", ""))
+    if bottom_likes:
+        stats["likes"] = bottom_likes
+
+    for key in ("comments", "collects"):
+        value = clean_text(social_stats.get(key, ""))
+        if value and not stats.get(key):
+            stats[key] = value
+
+    social_shares = clean_text(social_stats.get("shares", ""))
+    if social_shares:
+        likes_num = stat_to_number(stats.get("likes", ""))
+        social_likes_num = stat_to_number(social_stats.get("likes", ""))
+        shares_num = stat_to_number(social_shares)
+        if (not stats.get("likes")) or (0 < social_likes_num <= max(image_count, 1) and shares_num > social_likes_num):
+            stats["likes"] = social_shares
+            stats["shares"] = ""
+        elif social_shares != stats.get("likes"):
+            stats["shares"] = social_shares
+
+    if stats.get("shares") == stats.get("likes"):
+        stats["shares"] = ""
+
+
+def stat_to_number(value: Any) -> float:
+    text = clean_text(str(value or ""))
+    if not text:
+        return 0
+    multiplier = 1
+    if text.lower().endswith("k"):
+        multiplier = 1000
+        text = text[:-1]
+    elif text.lower().endswith("w") or text.endswith("万"):
+        multiplier = 10000
+        text = text[:-1]
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return 0
 
 
 def has_meaningful_note_content(title: str, content: str, images: list[str], videos: list[str]) -> bool:
@@ -513,7 +679,7 @@ def parse_stat_value(text: str, labels: list[str]) -> str:
 
 
 def is_blocked_text(text: str) -> bool:
-    markers = ["登录", "扫码", "验证码", "安全验证", "访问频繁", "请完成验证"]
+    markers = ["登录", "扫码", "验证码", "安全验证", "访问频繁", "请完成验证", "IP存在风险", "可靠网络环境", "300012"]
     return any(marker in text for marker in markers) and not ("关注" in text and "收藏" in text)
 
 
